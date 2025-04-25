@@ -1,137 +1,205 @@
 <?php
-namespace App\Services;
+namespace App\Console\Commands;
 
-use Illuminate\Support\Facades\Http;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
-class DexyPayService
+class GeneratePostmanCollection extends Command
 {
-    protected string $baseUrl;
-    protected string $token;
+    /**
+     * The name and signature of the console command.
+     *
+     * @var string
+     */
+    protected $signature = 'postman:generate
+                            {input : Path to OpenAPI JSON file}
+                            {output? : Path to write Postman collection JSON}
+                            {--folder= : Optional Postman folder name to group endpoints}';
 
-    public function __construct()
+    /**
+     * The console command description.
+     *
+     * @var string
+     */
+    protected $description = 'Generate a Postman Collection from an OpenAPI v3 JSON spec';
+
+    /**
+     * Execute the console command.
+     *
+     * @return int
+     */
+    public function handle()
     {
-        $this->baseUrl = config('dexypay.base_url');
-        $this->token   = config('dexypay.token');
+        $inputPath  = $this->argument('input');
+        $outputPath = $this->argument('output') ?? 'postman_collection.json';
+        $folderName = $this->option('folder');
+
+        if (! file_exists($inputPath)) {
+            $this->error("Input file not found: {$inputPath}");
+            return 1;
+        }
+
+        $spec = json_decode(file_get_contents($inputPath), true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->error('Invalid JSON: ' . json_last_error_msg());
+            return 1;
+        }
+
+        $collection = [
+            'info'     => [
+                'name'        => $spec['info']['title'] ?? 'API Collection',
+                '_postman_id' => (string) Str::uuid(),
+                'description' => $spec['info']['description'] ?? '',
+                'schema'      => 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+                'version'     => $spec['info']['version'] ?? '1.0.0',
+            ],
+            'variable' => [
+                [
+                    'key'         => 'baseUrl',
+                    'value'       => rtrim($spec['servers'][0]['url'] ?? '{{baseUrl}}', '/'),
+                    'description' => 'Base URL',
+                ],
+                [
+                    'key'         => 'token',
+                    'value'       => '',
+                    'description' => 'Bearer token (public or secret key)',
+                ],
+            ],
+            'auth'     => [
+                'type'   => 'bearer',
+                'bearer' => [
+                    [
+                        'key'   => 'token',
+                        'value' => '{{token}}',
+                        'type'  => 'string',
+                    ],
+                ],
+            ],
+            'item'     => [],
+        ];
+
+        $items = [];
+        foreach ($spec['paths'] as $path => $methods) {
+            foreach ($methods as $httpMethod => $operation) {
+                $request = [
+                    'method'      => strtoupper($httpMethod),
+                    'header'      => [],
+                    'url'         => [
+                        'raw'  => '{{baseUrl}}' . $this->formatPath($path),
+                        'host' => ['{{baseUrl}}'],
+                        'path' => array_values(array_filter(explode('/', trim($path, '/')))),
+                    ],
+                    'description' => $operation['description'] ?? '',
+                ];
+
+                // Authorization header if needed
+                if (! empty($spec['security']) || isset($operation['security'])) {
+                    $request['header'][] = [
+                        'key'   => 'Authorization',
+                        'value' => 'Bearer {{token}}',
+                        'type'  => 'string',
+                    ];
+                }
+
+                // JSON body
+                if (! empty($operation['requestBody']['content']['application/json']['schema']['properties'])) {
+                    $request['header'][] = [
+                        'key'   => 'Content-Type',
+                        'value' => 'application/json',
+                        'type'  => 'text',
+                    ];
+
+                    $payload         = $this->generateExamplePayload($operation['requestBody']['content']['application/json']['schema']);
+                    $request['body'] = [
+                        'mode' => 'raw',
+                        'raw'  => json_encode($payload, JSON_PRETTY_PRINT),
+                    ];
+                }
+
+                // Path parameters
+                if (! empty($operation['parameters'])) {
+                    $vars = [];
+                    foreach ($operation['parameters'] as $param) {
+                        if ($param['in'] === 'path') {
+                            $default = null;
+                            if (isset($param['schema']['default'])) {
+                                $default = $param['schema']['default'];
+                            } elseif (isset($param['example'])) {
+                                $default = $param['example'];
+                            }
+                            $vars[] = [
+                                'key'         => $param['name'],
+                                'value'       => $default ?? '',
+                                'description' => $param['description'] ?? '',
+                            ];
+                        }
+                    }
+                    if ($vars) {
+                        $request['url']['variable'] = $vars;
+                    }
+                }
+
+                $items[] = [
+                    'name'    => $operation['summary'] ?? ucfirst($httpMethod) . ' ' . $path,
+                    'request' => $request,
+                ];
+            }
+        }
+
+        // Group into folder if requested
+        if ($folderName) {
+            $collection['item'][] = [
+                'name' => $folderName,
+                'item' => $items,
+            ];
+        } else {
+            $collection['item'] = $items;
+        }
+
+        Storage::disk('local')->put($outputPath, json_encode($collection, JSON_PRETTY_PRINT));
+        $this->info("Postman collection generated at: {$outputPath}");
+
+        return 0;
     }
 
-    protected function headers(array $additional = []): array
+    /**
+     * Convert OpenAPI path to Postman style.
+     */
+    protected function formatPath(string $path): string
     {
-        return array_merge([
-            'Authorization' => "Bearer {$this->token}",
-            'Accept'        => 'application/json',
-            'Content-Type'  => 'application/json',
-        ], $additional);
+        return preg_replace('/\{(.+?)\}/', '{{$1}}', $path);
     }
 
-    public function getBalance()
+    /**
+     * Build example payload from schema, preserving defaults and examples.
+     */
+    protected function generateExamplePayload(array $schema): array
     {
-        $response = Http::withHeaders($this->headers())
-            ->get("{$this->baseUrl}/wallet/balance");
+        $example    = [];
+        $properties = $schema['properties'] ?? [];
 
-        return $response->throw()->json();
-    }
+        foreach ($properties as $key => $prop) {
+            if (array_key_exists('default', $prop)) {
+                $example[$key] = $prop['default'];
+            } elseif (array_key_exists('example', $prop)) {
+                $example[$key] = $prop['example'];
+            } else {
+                $type = $prop['type'] ?? 'string';
+                switch ($type) {
+                    case 'integer':
+                    case 'number':
+                        $example[$key] = 0;
+                        break;
+                    case 'boolean':
+                        $example[$key] = false;
+                        break;
+                    default:
+                        $example[$key] = '';
+                }
+            }
+        }
 
-    public function withdraw(float $amount)
-    {
-        $payload = ['amount' => $amount];
-
-        $response = Http::withHeaders($this->headers())
-            ->post("{$this->baseUrl}/wallet/withdraw", $payload);
-
-        return $response->throw()->json();
-    }
-
-    public function getTransaction(string $txnRef)
-    {
-        $url = "{$this->baseUrl}/transaction/{$txnRef}";
-
-        $response = Http::withHeaders($this->headers())
-            ->get($url);
-
-        return $response->throw()->json();
-    }
-
-    public function verifyTransaction(string $txnRef)
-    {
-        $url = "{$this->baseUrl}/transaction/verify/{$txnRef}";
-
-        $response = Http::withHeaders($this->headers())
-            ->get($url);
-
-        return $response->throw()->json();
-    }
-
-    public function getTransactions(): array
-    {
-        $response = Http::withHeaders($this->headers())
-            ->get("{$this->baseUrl}/transactions");
-
-        return $response->throw()->json();
-    }
-
-    public function initPayment(array $data)
-    {
-        $response = Http::withHeaders($this->headers())
-            ->post("{$this->baseUrl}/payment/initiate", $data);
-
-        return $response->throw()->json();
-    }
-
-    public function charge(array $data)
-    {
-        // For direct charge, DexyPay may not require auth header depending on flow
-        $response = Http::withHeaders([
-            'Accept'       => 'application/json',
-            'Content-Type' => 'application/json',
-        ])
-            ->post("{$this->baseUrl}/payment/charge", $data);
-
-        return $response->throw()->json();
+        return $example;
     }
 }
-
-// config/dexypay.php
-
-return [
-    'base_url' => env('DEXYPAY_BASE_URL', 'http://localhost/api/v1'),
-    'token'    => env('DEXYPAY_TOKEN', ''),
-];
-
-// Example usage in a controller:
-
-// namespace App\Http\Controllers;
-
-// use App\Services\DexyPayService;
-
-// class PaymentController extends Controller
-// {
-//     protected DexyPayService $dexy;
-//
-//     public function __construct(DexyPayService $dexy)
-//     {
-//         $this->dexy = $dexy;
-//     }
-//
-//     public function balance()
-//     {
-//         return response()->json($this->dexy->getBalance());
-//     }
-//
-//     public function withdraw()
-//     {
-//         $amount = request()->input('amount');
-//         return response()->json($this->dexy->withdraw($amount));
-//     }
-//
-//     public function init()
-//     {
-//         $data = request()->only(['name','email','amount','currency','redirect_url','pass_charge','direct_charge']);
-//         return response()->json($this->dexy->initPayment($data));
-//     }
-//
-//     public function charge()
-//     {
-//         $data = request()->only(['card_name','card_num','card_exp','card_secret','amount','currency_code','transaction_ref','direct_charge','payment_method']);
-//         return response()->json($this->dexy->charge($data));
-//     }
-// }
