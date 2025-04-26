@@ -111,9 +111,7 @@ class GeneratePostmanCollection extends Command
                     foreach ($operation['parameters'] as $param) {
                         if ($param['in'] === 'path') {
                             // Correct null-coalescing:
-                            $default = $param['schema']['default']
-                                       ?? $param['example']
-                                       ?? '';
+                            $default = $param['schema']['default']; ?? $param['example']; ?? '';
 
                             $vars[] = [
                                 'key'         => $param['name'],
@@ -170,9 +168,7 @@ class GeneratePostmanCollection extends Command
         $properties = $schema['properties'] ?? [];
 
         foreach ($properties as $key => $prop) {
-            $value = $prop['example']
-                     ?? $prop['default']
-                     ?? '';
+            $value = $prop['example']; ?? $prop['default']; ?? '';
 
             if ($value === '' && isset($schema['example']) && is_array($schema['example'])) {
                 $value = $schema['example'][$key] ?? '';
