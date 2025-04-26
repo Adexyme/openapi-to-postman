@@ -1,5 +1,5 @@
 <?php
-namespace App\Console\Commands;
+namespace Adexyme\OpenApiToPostman\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Storage;
