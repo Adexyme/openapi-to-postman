@@ -1,5 +1,5 @@
 <?php
-namespace Adexyme\OpenApiToPostman\Console;
+namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Storage;
@@ -7,28 +7,13 @@ use Illuminate\Support\Str;
 
 class GeneratePostmanCollection extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
     protected $signature = 'postman:generate
                             {input : Path to OpenAPI JSON file}
                             {output? : Path to write Postman collection JSON}
                             {--folder= : Optional Postman folder name to group endpoints}';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
     protected $description = 'Generate a Postman Collection from an OpenAPI v3 JSON spec';
 
-    /**
-     * Execute the console command.
-     *
-     * @return int
-     */
     public function handle()
     {
         $inputPath  = $this->argument('input');
@@ -102,18 +87,18 @@ class GeneratePostmanCollection extends Command
                     ];
                 }
 
-                // JSON body
+                // Body: generate form-data instead of raw JSON
                 if (! empty($operation['requestBody']['content']['application/json']['schema']['properties'])) {
                     $request['header'][] = [
                         'key'   => 'Content-Type',
-                        'value' => 'application/json',
+                        'value' => 'multipart/form-data',
                         'type'  => 'text',
                     ];
 
-                    $payload         = $this->generateExamplePayload($operation['requestBody']['content']['application/json']['schema']);
+                    $formdata        = $this->generateFormData($operation['requestBody']['content']['application/json']['schema']);
                     $request['body'] = [
-                        'mode' => 'raw',
-                        'raw'  => json_encode($payload, JSON_PRETTY_PRINT),
+                        'mode'     => 'formdata',
+                        'formdata' => $formdata,
                     ];
                 }
 
@@ -122,15 +107,10 @@ class GeneratePostmanCollection extends Command
                     $vars = [];
                     foreach ($operation['parameters'] as $param) {
                         if ($param['in'] === 'path') {
-                            $default = null;
-                            if (isset($param['schema']['default'])) {
-                                $default = $param['schema']['default'];
-                            } elseif (isset($param['example'])) {
-                                $default = $param['example'];
-                            }
-                            $vars[] = [
+                            $default = $param['schema']['default'] ?? $param['example'] ?? '';
+                            $vars[]  = [
                                 'key'         => $param['name'],
-                                'value'       => $default ?? '',
+                                'value'       => $default,
                                 'description' => $param['description'] ?? '',
                             ];
                         }
@@ -157,49 +137,33 @@ class GeneratePostmanCollection extends Command
             $collection['item'] = $items;
         }
 
-        Storage::disk('local')->put($outputPath, json_encode($collection, JSON_PRETTY_PRINT));
+        Storage::disk('local')->put($outputPath, json_encode($collection, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
         $this->info("Postman collection generated at: {$outputPath}");
 
         return 0;
     }
 
-    /**
-     * Convert OpenAPI path to Postman style.
-     */
     protected function formatPath(string $path): string
     {
         return preg_replace('/\{(.+?)\}/', '{{$1}}', $path);
     }
 
-    /**
-     * Build example payload from schema, preserving defaults and examples.
-     */
-    protected function generateExamplePayload(array $schema): array
+    protected function generateFormData(array $schema): array
     {
-        $example    = [];
+        $formData   = [];
         $properties = $schema['properties'] ?? [];
 
         foreach ($properties as $key => $prop) {
-            if (array_key_exists('default', $prop)) {
-                $example[$key] = $prop['default'];
-            } elseif (array_key_exists('example', $prop)) {
-                $example[$key] = $prop['example'];
-            } else {
-                $type = $prop['type'] ?? 'string';
-                switch ($type) {
-                    case 'integer':
-                    case 'number':
-                        $example[$key] = 0;
-                        break;
-                    case 'boolean':
-                        $example[$key] = false;
-                        break;
-                    default:
-                        $example[$key] = '';
-                }
-            }
+            $value = $prop['example'] ?? ($prop['default'] ?? '');
+
+            $formData[] = [
+                'key'         => $key,
+                'value'       => (string) $value,
+                'type'        => 'text',
+                'description' => $prop['description'] ?? '',
+            ];
         }
 
-        return $example;
+        return $formData;
     }
 }
