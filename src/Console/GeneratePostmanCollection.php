@@ -87,7 +87,7 @@ class GeneratePostmanCollection extends Command
                     ];
                 }
 
-                // Body: generate form-data instead of raw JSON
+                // Body: form-data, now including example values
                 if (! empty($operation['requestBody']['content']['application/json']['schema']['properties'])) {
                     $request['header'][] = [
                         'key'   => 'Content-Type',
@@ -95,7 +95,10 @@ class GeneratePostmanCollection extends Command
                         'type'  => 'text',
                     ];
 
-                    $formdata        = $this->generateFormData($operation['requestBody']['content']['application/json']['schema']);
+                    $formdata = $this->generateFormDataWithExamples(
+                        $operation['requestBody']['content']['application/json']['schema']
+                    );
+
                     $request['body'] = [
                         'mode'     => 'formdata',
                         'formdata' => $formdata,
@@ -107,15 +110,15 @@ class GeneratePostmanCollection extends Command
                     $vars = [];
                     foreach ($operation['parameters'] as $param) {
                         if ($param['in'] === 'path') {
-                            $default = $param['schema']['default'] ?? $param['example'] ?? '';
+                            $default = $param['schema']['default']; ?? $param['example']; ?? '';
                             $vars[]  = [
                                 'key'         => $param['name'],
-                                'value'       => $default,
+                                'value'       => (string) $default,
                                 'description' => $param['description'] ?? '',
                             ];
                         }
                     }
-                    if ($vars) {
+                    if (! empty($vars)) {
                         $request['url']['variable'] = $vars;
                     }
                 }
@@ -137,24 +140,45 @@ class GeneratePostmanCollection extends Command
             $collection['item'] = $items;
         }
 
-        Storage::disk('local')->put($outputPath, json_encode($collection, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        Storage::disk('local')->put(
+            $outputPath,
+            json_encode($collection, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+        );
         $this->info("Postman collection generated at: {$outputPath}");
 
         return 0;
     }
 
+    /**
+     * Convert OpenAPI path template to Postman-style {{var}} syntax.
+     */
     protected function formatPath(string $path): string
     {
         return preg_replace('/\{(.+?)\}/', '{{$1}}', $path);
     }
 
-    protected function generateFormData(array $schema): array
+    /**
+     * Generate form-data array, pulling `example` (or `default`) from each property.
+     */
+    protected function generateFormDataWithExamples(array $schema): array
     {
         $formData   = [];
         $properties = $schema['properties'] ?? [];
 
         foreach ($properties as $key => $prop) {
-            $value = $prop['example'] ?? ($prop['default'] ?? '');
+            // Prefer property-level example; fall back to default; else blank
+            $value = '';
+            if (isset($prop['example'])) {
+                $value = $prop['example'];
+            } elseif (isset($prop['default'])) {
+                $value = $prop['default'];
+            }
+
+            // If schema-level "example" (not per-property) exists, and no per-property example:
+            if ($value === '' && isset($schema['example']) && is_array($schema['example'])) {
+                // take property value if present in schema.example
+                $value = $schema['example'][$key] ?? '';
+            }
 
             $formData[] = [
                 'key'         => $key,
