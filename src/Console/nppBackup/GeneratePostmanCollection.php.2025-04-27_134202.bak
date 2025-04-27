@@ -67,61 +67,18 @@ class GeneratePostmanCollection extends Command
         $items = [];
         foreach ($spec['paths'] as $path => $methods) {
             foreach ($methods as $httpMethod => $operation) {
-                // Base request skeleton
                 $request = [
                     'method'      => strtoupper($httpMethod),
                     'header'      => [],
                     'url'         => [
-                        'raw'   => '{{baseUrl}}' . $this->formatPath($path),
-                        'host'  => ['{{baseUrl}}'],
-                        'path'  => array_values(array_filter(explode('/', trim($path, '/')))),
+                        'raw'  => '{{baseUrl}}' . $this->formatPath($path),
+                        'host' => ['{{baseUrl}}'],
+                        'path' => array_values(array_filter(explode('/', trim($path, '/')))),
                     ],
                     'description' => $operation['description'] ?? '',
                 ];
 
-                // === PARAMETERS ===
-                $pathVars  = [];
-                $queryVars = [];
-                foreach ($operation['parameters'] ?? [] as $param) {
-                    switch ($param['in']) {
-                        case 'path':
-                            $pathVars[] = [
-                                'key'         => $param['name'],
-                                'value'       => (string) ($param['schema']['default']
-                                                       ?? $param['example']
-                                                       ?? ''),
-                                'description' => $param['description'] ?? '',
-                            ];
-                            break;
-
-                        case 'query':
-                            $queryVars[] = [
-                                'key'         => $param['name'],
-                                'value'       => (string) ($param['schema']['default']
-                                                       ?? $param['example']
-                                                       ?? ''),
-                                'description' => $param['description'] ?? '',
-                            ];
-                            break;
-
-                        case 'header':
-                            $request['header'][] = [
-                                'key'         => $param['name'],
-                                'value'       => (string) ($param['schema']['default']
-                                                       ?? $param['example']
-                                                       ?? ''),
-                                'type'        => 'text',
-                                'description' => $param['description'] ?? '',
-                            ];
-                            break;
-
-                        // you can add 'cookie' or others here...
-                    }
-                }
-                if ($pathVars)  { $request['url']['variable'] = $pathVars; }
-                if ($queryVars) { $request['url']['query']    = $queryVars; }
-
-                // === AUTH HEADER ===
+                // Authorization header if needed
                 if (! empty($spec['security']) || isset($operation['security'])) {
                     $request['header'][] = [
                         'key'   => 'Authorization',
@@ -130,40 +87,43 @@ class GeneratePostmanCollection extends Command
                     ];
                 }
 
-                // === REQUEST BODY ===
-                if (! empty($operation['requestBody']['content'])) {
-                    foreach ($operation['requestBody']['content'] as $contentType => $media) {
-                        if (isset($media['schema']['properties'])) {
-                            switch ($contentType) {
-                                case 'application/json':
-                                    // form-data for JSON
-                                    $request['header'][] = [
-                                        'key'   => 'Content-Type',
-                                        'value' => 'multipart/form-data',
-                                        'type'  => 'text',
-                                    ];
-                                    $request['body'] = [
-                                        'mode'     => 'formdata',
-                                        'formdata' => $this->generateFormDataWithExamples($media['schema']),
-                                    ];
-                                    break;
+                // Body: form-data with examples/defaults
+                if (! empty($operation['requestBody']['content']['application/json']['schema']['properties'])) {
+                    $request['header'][] = [
+                        'key'   => 'Content-Type',
+                        'value' => 'multipart/form-data',
+                        'type'  => 'text',
+                    ];
 
-                                case 'application/x-www-form-urlencoded':
-                                    // urlencoded for form data
-                                    $request['header'][] = [
-                                        'key'   => 'Content-Type',
-                                        'value' => 'application/x-www-form-urlencoded',
-                                        'type'  => 'text',
-                                    ];
-                                    $request['body'] = [
-                                        'mode'       => 'urlencoded',
-                                        'urlencoded' => $this->generateFormDataWithExamples($media['schema']),
-                                    ];
-                                    break;
+                    $formdata = $this->generateFormDataWithExamples(
+                        $operation['requestBody']['content']['application/json']['schema']
+                    );
 
-                                // add other content-types (e.g. form-data file) here...
-                            }
+                    $request['body'] = [
+                        'mode'     => 'formdata',
+                        'formdata' => $formdata,
+                    ];
+                }
+
+                // Path parameters
+                if (! empty($operation['parameters'])) {
+                    $vars = [];
+                    foreach ($operation['parameters'] as $param) {
+                        if ($param['in'] === 'path') {
+                            // Correct null-coalescing:
+                            $default = $param['schema']['default']
+                                       ?? $param['example']
+                                       ?? '';
+
+                            $vars[] = [
+                                'key'         => $param['name'],
+                                'value'       => (string) $default,
+                                'description' => $param['description'] ?? '',
+                            ];
                         }
+                    }
+                    if (! empty($vars)) {
+                        $request['url']['variable'] = $vars;
                     }
                 }
 
@@ -188,16 +148,22 @@ class GeneratePostmanCollection extends Command
             $outputPath,
             json_encode($collection, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
         );
-
         $this->info("Postman collection generated at: {$outputPath}");
+
         return 0;
     }
 
+    /**
+     * Convert OpenAPI path template to Postman-style {{var}} syntax.
+     */
     protected function formatPath(string $path): string
     {
         return preg_replace('/\{(.+?)\}/', '{{$1}}', $path);
     }
 
+    /**
+     * Generate form-data array, pulling `example` (or `default`) from each property.
+     */
     protected function generateFormDataWithExamples(array $schema): array
     {
         $formData   = [];
@@ -205,9 +171,12 @@ class GeneratePostmanCollection extends Command
 
         foreach ($properties as $key => $prop) {
             $value = $prop['example']
-                   ?? $prop['default']
-                   ?? ($schema['example'][$key] ?? '')
-                   ?? '';
+                     ?? $prop['default']
+                     ?? '';
+
+            if ($value === '' && isset($schema['example']) && is_array($schema['example'])) {
+                $value = $schema['example'][$key] ?? '';
+            }
 
             $formData[] = [
                 'key'         => $key,
